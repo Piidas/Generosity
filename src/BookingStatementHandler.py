@@ -180,8 +180,11 @@ class BookingStatementHandler:
                             bank_account_id, account_id):
         ''' Schließen von offenen Positionen nach dem FIFO-Prinzip '''
 
-        stocks_to_sell = abs(row["tradeQuantity"])
-        amount_to_sell = abs(row["amount"])
+        # Store a copy of the original trade row for later use
+        orig_trade = row.copy()
+
+        stocks_to_sell = abs(orig_trade["tradeQuantity"])
+        amount_to_sell = abs(orig_trade["amount"])
 
         if not einnahmen > 0:
             einnahmen = 0.0
@@ -192,10 +195,9 @@ class BookingStatementHandler:
         if not restbuchwert > 0:
             restbuchwert = 0.0
 
-        self.track_processing(account_id, int(row["transactionID"]), row["amount"], row["date"])
+        self.track_processing(account_id, int(orig_trade["transactionID"]), orig_trade["amount"], orig_trade["date"])
 
         for i, row in open_in_depot.iterrows():
-
             stocks_in_depot_entry = abs(row["tradeQuantity"])
 
             if stock_adjustment > 0:
@@ -214,9 +216,10 @@ class BookingStatementHandler:
                     # Calculate the values for the p&l calculation and bookings
                     quantity = abs(stocks_in_depot_entry)
 
-                    if einnahmen > 0:
+                    # !!! Hier wird mein korrekter amount_to_selll überschrieben sodass die PnL nicht korrekt ist
+                    if amount_to_sell == 0 and einnahmen != 0:
                         amount_to_sell = einnahmen
-                    else:
+                    elif amount_to_sell != 0 and einnahmen == 0:
                         einnahmen = amount_to_sell
 
                     if restbuchwert == 0:
@@ -519,7 +522,7 @@ class BookingStatementHandler:
                                         desc="Schließen einer gekauften Optionsposition",
                                         sdesc="Verbuchen des Gewinns",
                                         amount=result, soll=3500, haben=4830, account_id=account_id,
-                                            quality_check_relevant=False)
+                                        quality_check_relevant=False)
 
                     if identifier == "l":
                         self.book_statement(row=row, id="ATG_0000001_0000002",
@@ -532,6 +535,54 @@ class BookingStatementHandler:
                                             sdesc="Verbuchen des Verlusts",
                                             amount=result, soll=7210, haben=bank_account_id, account_id=account_id,
                                             quality_check_relevant=False)
+
+        # --- New Block: Handle leftover shares if not all were closed ---
+        if stocks_to_sell > 0:
+            if direction == "SELL":
+                # Overselling: eröffne eine neue Shortposition für die verbleibenden Aktien
+                new_row = orig_trade.copy()
+                new_row["tradeQuantity"] = -stocks_to_sell  # Negative Menge signalisiert eine Shortposition
+                new_row["amount"] = - (stocks_to_sell / abs(orig_trade["tradeQuantity"])) * abs(orig_trade["amount"])
+                self.add_open_position(new_row)
+                logging.info(f"Neue Shortposition eröffnet für verbleibende {stocks_to_sell} Aktien.")
+
+                # NEU: Buche die Short-Eröffnung
+                short_amount = abs(new_row["amount"])  # meist positiv aus der Sicht "Kreditor"
+                self.book_statement(
+                    row=new_row,
+                    id="ATG_0000006_0000005",  # z.B. deine Kennung für Short-Verkäufe
+                    desc="Aktienverkauf",
+                    sdesc="Eröffnung einer Shortposition (Overshoot)",
+                    amount=short_amount,
+                    soll=bank_account_id,
+                    haben=1510,  # WP-Konto – je nach Kontenplan
+                    account_id=account_id,
+                    quality_check_relevant=True
+                )
+
+            elif direction == "BUYTOCLOSESHORT":
+                # Bei Overshooting eines Shorts: eröffne eine neue Longposition für die verbleibenden Aktien
+                new_row = orig_trade.copy()
+                new_row["tradeQuantity"] = stocks_to_sell
+                new_row["amount"] = (stocks_to_sell / abs(orig_trade["tradeQuantity"])) * abs(orig_trade["amount"])
+                self.add_open_position(new_row)
+                logging.info(f"Neue Longposition eröffnet für verbleibende {stocks_to_sell} Aktien.")
+
+                # NEU: Buche die (ungeplante) Long-Eröffnung durch Overshoot
+                new_long_amount = abs(new_row["amount"])
+                self.book_statement(
+                    row=new_row,
+                    id="ATG_0000005_0000001",  # oder ein anderes, passendes Satz-ID
+                    desc="Aktienkauf",
+                    sdesc="Eröffnung einer Longposition (Overshoot)",
+                    amount=new_long_amount,
+                    soll=1510,  # Konto für Wertpapiere (Aktien)
+                    haben=bank_account_id,  # Dein Bankkonto
+                    account_id=account_id,
+                    quality_check_relevant=True
+                )
+
+            stocks_to_sell = 0
 
         return stock_adjustment, restbuchwert, einnahmen
 
