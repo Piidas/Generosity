@@ -1,12 +1,41 @@
 import logging
 import os
+import sys
 
 from ConfigHandler import ConfigHandler
 from src.BookingStatementHandler import BookingStatementHandler
 from src.ImportHandler import ImportHandler
 
-logging.basicConfig(level=logging.DEBUG, filename='Main.log')
+# Clear any existing logging configuration
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
+
+# Create logger
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
+
+# Create a file handler that writes to an absolute path
+log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Main.log")
+fh = logging.FileHandler(log_file, mode='w')
+fh.setLevel(logging.DEBUG)
+file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+fh.setFormatter(file_formatter)
+logger.addHandler(fh)
+
+# Also add a console handler so you can see logs in the PyCharm console
+ch = logging.StreamHandler(sys.stdout)
+ch.setLevel(logging.DEBUG)
+console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+ch.setFormatter(console_formatter)
+logger.addHandler(ch)
+
+logging.debug("Logging is now configured.")
+
+
+
+# logging.basicConfig(level=logging.DEBUG, filename='Main.log')
 # logging.basicConfig(level=logging.ERROR)
+
 
 # Get the Instances
 imp = ImportHandler()
