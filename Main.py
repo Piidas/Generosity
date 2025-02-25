@@ -31,11 +31,8 @@ logger.addHandler(ch)
 
 logging.debug("Logging is now configured.")
 
-
-
 # logging.basicConfig(level=logging.DEBUG, filename='Main.log')
 # logging.basicConfig(level=logging.ERROR)
-
 
 # Get the Instances
 imp = ImportHandler()

@@ -183,30 +183,31 @@ class BookingStatementHandler:
         # Store a copy of the original trade row for later use
         orig_trade = row.copy()
 
+        # Wie viele Shares wollen wir "verkaufen" (bzw. buy to close)
         stocks_to_sell = abs(orig_trade["tradeQuantity"])
         amount_to_sell = abs(orig_trade["amount"])
 
+        # Hilfsvariablen, falls sie nicht >0 sind
         if not einnahmen > 0:
             einnahmen = 0.0
-
         if not stock_adjustment > 0:
             stock_adjustment = 0.0
-
         if not restbuchwert > 0:
             restbuchwert = 0.0
 
+        # Zur Info, dass dieser Datensatz verarbeitet wurde
         self.track_processing(account_id, int(orig_trade["transactionID"]), orig_trade["amount"], orig_trade["date"])
 
-        for i, row in open_in_depot.iterrows():
-            stocks_in_depot_entry = abs(row["tradeQuantity"])
+        for i, open_in_depot_row in open_in_depot.iterrows():
+            stocks_in_depot_entry = abs(open_in_depot_row["tradeQuantity"])
 
             if stock_adjustment > 0:
                 stocks_in_depot_entry = stock_adjustment
 
-            stocks_in_depot_entry_original = abs(row["tradeQuantity"])
-            amount_in_depot_entry = abs(row["amount"])
-            amount_in_depot_entry_original = abs(row["amount"])
-            stock_in_depot_id = int(row["transactionID"])
+            stocks_in_depot_entry_original = abs(open_in_depot_row["tradeQuantity"])
+            amount_in_depot_entry = abs(open_in_depot_row["amount"])
+            amount_in_depot_entry_original = abs(open_in_depot_row["amount"])
+            stock_in_depot_id = int(open_in_depot_row["transactionID"])
 
             if stocks_to_sell == 0:
                 pass
@@ -216,15 +217,21 @@ class BookingStatementHandler:
                     # Calculate the values for the p&l calculation and bookings
                     quantity = abs(stocks_in_depot_entry)
 
-                    # !!! Hier wird mein korrekter amount_to_selll überschrieben sodass die PnL nicht korrekt ist
-                    if amount_to_sell == 0 and einnahmen != 0:
+                    # Get the flag values, defaulting to None if the key is missing.
+                    short_flag = open_in_depot_row.get("shortOvershoot", None)
+                    long_flag = open_in_depot_row.get("longOvershoot", None)
+
+                    # We want to consider the flag as False if it is either missing, NaN, or explicitly False.
+                    if einnahmen > 0 and (short_flag is None or pd.isnull(short_flag) or short_flag is False) and (
+                            long_flag is None or pd.isnull(long_flag) or long_flag is False):
                         amount_to_sell = einnahmen
-                    elif amount_to_sell != 0 and einnahmen == 0:
-                        einnahmen = amount_to_sell
+                    else:
+                       einnahmen = amount_to_sell
 
                     if restbuchwert == 0:
                         restbuchwert = amount_in_depot_entry
                     else:
+                        # Im Fall eines Teilverkaufes einer offenen Position
                         amount_in_depot_entry = restbuchwert
 
                     amount_to_sell = (amount_to_sell / stocks_to_sell) * quantity
@@ -232,7 +239,7 @@ class BookingStatementHandler:
                     # Calculate the values for the p&l calculation and bookings
                     quantity = abs(stocks_to_sell)
 
-                    logging.info(f'{int(row["transactionID"])} / {row["symbol"]} '
+                    logging.info(f'{int(open_in_depot_row["transactionID"])} / {open_in_depot_row["symbol"]} '
                                  f'=> Option 1: Ich habe {stocks_in_depot_entry} Aktien im Depot. '
                                  f'Hier will ich nun die folgende Operation {direction} '
                                  f'mit der Menge {quantity} durchführen. '
@@ -266,11 +273,12 @@ class BookingStatementHandler:
                     if restbuchwert == 0:
                         restbuchwert = amount_in_depot_entry
                     else:
+                        # Wenn bereits ein Teilverkauf stattgefunden hat
                         amount_in_depot_entry = restbuchwert
 
                     amount_to_sell = (amount_to_sell / stocks_to_sell) * quantity
 
-                    logging.info(f'{int(row["transactionID"])} / {row["symbol"]} '
+                    logging.info(f'{int(open_in_depot_row["transactionID"])} / {open_in_depot_row["symbol"]} '
                                  f'=> Option 2: Ich habe {stocks_in_depot_entry} Aktien im Depot. '
                                  f'Hier will ich nun die folgende Operation {direction} '
                                  f'mit der Menge {quantity} durchführen. '
@@ -304,7 +312,7 @@ class BookingStatementHandler:
                     if einnahmen > 0:
                         amount_to_sell = einnahmen
 
-                    logging.info(f'{int(row["transactionID"])} / {row["symbol"]} => '
+                    logging.info(f'{int(open_in_depot_row["transactionID"])} / {open_in_depot_row["symbol"]} => '
                                  f'Option 3: Ich habe {stocks_in_depot_entry} Aktien im Depot. '
                                  f'Hier will ich nun die folgende Operation {direction} '
                                  f'mit der Menge {quantity} durchführen. '
@@ -314,7 +322,7 @@ class BookingStatementHandler:
                     # Adapt the loop
                     stocks_to_sell = stocks_to_sell - quantity
 
-                    if row["tradeQuantity"] < 0 and quantity > 0:
+                    if open_in_depot_row["tradeQuantity"] < 0 and quantity > 0:
                         stocks_in_depot_entry = (stocks_in_depot_entry * -1) + quantity
                     else:
                         stocks_in_depot_entry = stocks_in_depot_entry - quantity
@@ -346,7 +354,7 @@ class BookingStatementHandler:
                 # If I reduced the amount of stocks I have in the depot, I will adjust my open positions
                 if stocks_in_depot_entry_original != stocks_in_depot_entry:
                     self.fifo_positions.loc[self.fifo_positions['transactionID'] == int(
-                        row["transactionID"]), 'tradeQuantity'] = stocks_in_depot_entry
+                        open_in_depot_row["transactionID"]), 'tradeQuantity'] = stocks_in_depot_entry
 
                     stock_adjustment = 0.0
 
@@ -354,7 +362,7 @@ class BookingStatementHandler:
                 # If I reduced the amount of stocks, I need to reevaluate my open positions and adjust
                 if amount_in_depot_entry_original != restbuchwert:
                     self.fifo_positions.loc[self.fifo_positions['transactionID'] == int(
-                        row["transactionID"]), 'amount'] = restbuchwert
+                        open_in_depot_row["transactionID"]), 'amount'] = restbuchwert
 
                     restbuchwert = 0.0
 
@@ -362,191 +370,193 @@ class BookingStatementHandler:
                 identifier, result = self.calculate_p_l(direction, amount_in_depot_entry, amount_to_sell)
                 logging.debug(f'Mit diesem Trade habe ich einen {identifier} gemacht und {result} realisiert!')
 
-                if row["assetCategory"] == "STK" and direction == "SELL":
+                if open_in_depot_row["assetCategory"] == "STK" and direction == "SELL":
 
                     if identifier == "p":
-                        self.book_statement(row=row, id="ATG_0000006_0000001",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000006_0000001",
                                             desc="Aktienverkauf", sdesc="Erlösbuchung",
                                             amount=amount_to_sell, soll=bank_account_id, haben=4852,
                                             account_id=account_id, quality_check_relevant=True)
 
-                        self.book_statement(row=row, id="ATG_0000006_0000002",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000006_0000002",
                                             desc="Aktienverkauf", sdesc="Abgang des Wertpapiers",
                                             amount=amount_in_depot_entry, soll=4858, haben=1510,
                                             account_id=account_id, quality_check_relevant=False)
 
                     if identifier == "l":
-                        self.book_statement(row=row, id="ATG_0000006_0000003",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000006_0000003",
                                             desc="Aktienverkauf", sdesc="Aufwandsbuchung",
                                             amount=amount_to_sell, soll=bank_account_id, haben=6892,
                                             account_id=account_id, quality_check_relevant=True)
 
-                        self.book_statement(row=row, id="ATG_0000006_0000004",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000006_0000004",
                                             desc="Aktienverkauf", sdesc="Abgang des Wertpapiers",
                                             amount=amount_in_depot_entry, soll=6898, haben=1510, account_id=account_id,
                                             quality_check_relevant=False)
 
                     if identifier == "even":
-                        self.book_statement(row=row, id="ATG_0000006_0000020",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000006_0000020",
                                             desc="Aktienverkauf", sdesc="Schließen eines Long ohne Gewinn oder Verlust",
                                             amount=amount_in_depot_entry, soll=bank_account_id, haben=1510,
                                             account_id=account_id,
                                             quality_check_relevant=True)
 
-                if row["assetCategory"] == "STK" and direction == "BUY":
+                if open_in_depot_row["assetCategory"] == "STK" and direction == "BUY":
                     if identifier == "p":
-                        self.book_statement(row=row, id="ATG_0000005_0000002 ",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000005_0000002 ",
                                             desc="Aktienkauf", sdesc="Gewinnbuchung",
                                             amount=amount_to_sell, soll=4852, haben=bank_account_id,
                                             account_id=account_id, quality_check_relevant=True)
 
-                        self.book_statement(row=row, id="ATG_0000005_0000003",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000005_0000003",
                                             desc="Aktienkauf", sdesc="Abgang des Wertpapiers",
                                             amount=amount_in_depot_entry, soll=1510, haben=4858, account_id=account_id,
                                             quality_check_relevant=False)
 
                     if identifier == "l":
-                        self.book_statement(row=row, id="ATG_0000005_0000004",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000005_0000004",
                                             desc="Aktienverkauf", sdesc="Verlustbuchung",
                                             amount=amount_to_sell, soll=6892, haben=bank_account_id,
                                             account_id=account_id, quality_check_relevant=True)
 
-                        self.book_statement(row=row, id="ATG_0000005_0000005",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000005_0000005",
                                             desc="Aktienverkauf", sdesc="Abgang des Wertpapiers",
                                             amount=amount_in_depot_entry, soll=1510, haben=6898, account_id=account_id,
                                             quality_check_relevant=False)
 
-                if row["assetCategory"] == "STK" and direction == "BUYTOCLOSESHORT":
+                if open_in_depot_row["assetCategory"] == "STK" and direction == "BUYTOCLOSESHORT":
                     if identifier == "p":
-                        self.book_statement(row=row, id="ATG_0000005_0000002 ",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000005_0000002 ",
                                             desc="Aktienkauf", sdesc="Gewinnbuchung",
                                             amount=amount_to_sell, soll=4852, haben=bank_account_id,
                                             account_id=account_id, quality_check_relevant=True)
 
-                        self.book_statement(row=row, id="ATG_0000005_0000003",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000005_0000003",
                                             desc="Aktienkauf", sdesc="Abgang des Wertpapiers",
                                             amount=amount_in_depot_entry, soll=1510, haben=4858, account_id=account_id,
                                             quality_check_relevant=False)
 
                     if identifier == "l":
-                        self.book_statement(row=row, id="ATG_0000005_0000012",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000005_0000012",
                                             desc="Aktienverkauf", sdesc="Verlustbuchung",
                                             amount=amount_to_sell, soll=6892, haben=bank_account_id,
                                             account_id=account_id, quality_check_relevant=True)
 
-                        self.book_statement(row=row, id="ATG_0000005_0000011",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000005_0000011",
                                             desc="Aktienverkauf", sdesc="Abgang des Wertpapiers",
                                             amount=amount_in_depot_entry, soll=1510, haben=6898, account_id=account_id,
                                             quality_check_relevant=False)
 
                     if identifier == "even":
-                        self.book_statement(row=row, id="ATG_0000005_0000010",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000005_0000010",
                                             desc="Aktienverkauf",
                                             sdesc="Schließen eines Shorts ohne Gewinn oder Verlust",
                                             amount=amount_in_depot_entry, soll=1510, haben=1810, account_id=account_id,
                                             # changes test cycle 19.7
                                             quality_check_relevant=True)
 
-                if (row["assetCategory"] == "OPT" or row["assetCategory"] == "FOP") and direction == "BUYTOCLOSESHORT":
+                if (open_in_depot_row["assetCategory"] == "OPT" or open_in_depot_row["assetCategory"] == "FOP") and direction == "BUYTOCLOSESHORT":
                     if identifier == "p":
-                        self.book_statement(row=row, id="ATG_0000001_0000002",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000001_0000002",
                                             desc="Schließen einer verkauften Optionsposition",
                                             sdesc="Ausbuchen der Verbindlichkeit",
                                             amount=amount_to_sell, soll=3500, haben=bank_account_id,
                                             account_id=account_id, quality_check_relevant=True)
-                        self.book_statement(row=row, id="ATG_0000001_0000003",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000001_0000003",
                                             desc="Schließen einer verkauften Optionsposition",
                                             sdesc="Verbuchen des Gewinns",
                                             amount=result, soll=3500, haben=4830, account_id=account_id,
                                             quality_check_relevant=False)
 
                     if identifier == "l":
-                        self.book_statement(row=row, id="ATG_0000001_0000002",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000001_0000002",
                                             desc="Schließen einer verkauften Optionsposition",
                                             sdesc="Ausbuchen der Verbindlichkeit",
                                             amount=amount_to_sell, soll=3500, haben=bank_account_id,
                                             account_id=account_id, quality_check_relevant=True)
-                        self.book_statement(row=row, id="ATG_0000001_0000003",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000001_0000003",
                                             desc="Schließen einer verkauften Optionsposition",
                                             sdesc="Verbuchen des Verlusts",
                                             amount=result, soll=6300, haben=3500, account_id=account_id,
                                             quality_check_relevant=False)
 
                     if identifier == "even":
-                        self.book_statement(row=row, id="ATG_0000001_0000001",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000001_0000001",
                                             desc="Schließen einer verkauften Optionsposition",
                                             sdesc="Rückbuchen ohne Gewinn oder Verlust",
                                             amount=amount_to_sell, soll=3500, haben=bank_account_id,
                                             account_id=account_id, quality_check_relevant=True)
 
-            if (row["assetCategory"] == "OPT" or row["assetCategory"] == "FOP") and direction == "SELLTOCLOSELONG":
+            if (open_in_depot_row["assetCategory"] == "OPT" or open_in_depot_row["assetCategory"] == "FOP") and direction == "SELLTOCLOSELONG":
                 if identifier == "p":
-                    self.book_statement(row=row, id="ATG_0000002_0000005",
+                    self.book_statement(row=open_in_depot_row, id="ATG_0000002_0000005",
                                         desc="Schließen einer gekauften Optionsposition",
                                         sdesc="Ausbuchen des Ausübungsrechts",
                                         amount=amount_to_sell, soll=bank_account_id, haben=1510,
                                         account_id=account_id, quality_check_relevant=True)
-                    self.book_statement(row=row, id="ATG_0000002_0000005",
+                    self.book_statement(row=open_in_depot_row, id="ATG_0000002_0000005",
                                         desc="Schließen einer verkauften Optionsposition",
                                         sdesc="Verbuchen des Gewinns",
                                         amount=result, soll=1510, haben=4830, account_id=account_id,
                                         quality_check_relevant=False)
 
                 if identifier == "l":
-                    self.book_statement(row=row, id="ATG_0000002_0000006",
+                    self.book_statement(row=open_in_depot_row, id="ATG_0000002_0000006",
                                         desc="Schließen einer gekauften Optionsposition",
                                         sdesc="Ausbuchen des Ausübungsrechts",
                                         amount=amount_to_sell, soll=bank_account_id, haben=1510,
                                         account_id=account_id, quality_check_relevant=True)
-                    self.book_statement(row=row, id="ATG_0000002_0000006",
+                    self.book_statement(row=open_in_depot_row, id="ATG_0000002_0000006",
                                         desc="Schließen einer verkauften Optionsposition",
                                         sdesc="Verbuchen des Verlusts",
                                         amount=result, soll=6300, haben=1510, account_id=account_id,
                                         quality_check_relevant=False)
 
                 if identifier == "even":
-                    self.book_statement(row=row, id="ATG_0000002_0000004",
+                    self.book_statement(row=open_in_depot_row, id="ATG_0000002_0000004",
                                         desc="Schließen einer gekauften Optionsposition",
                                         sdesc="Rückbuchen ohne Gewinn oder Verlust",
                                         amount=amount_to_sell, soll=bank_account_id, haben=1510,
                                         account_id=account_id, quality_check_relevant=True)
 
-            if (row["assetCategory"] == "OPT" or row["assetCategory"] == "FOP") and direction == "SELLTOCLOSESHORT":
+            if (open_in_depot_row["assetCategory"] == "OPT" or open_in_depot_row["assetCategory"] == "FOP") and direction == "SELLTOCLOSESHORT":
                 if identifier == "p":
-                    self.book_statement(row=row, id="ATG_0000001_0000002",
+                    self.book_statement(row=open_in_depot_row, id="ATG_0000001_0000002",
                                         desc="Schließen einer gekauften Optionsposition",  # TODO-Check
                                         sdesc="Ausbuchen der Verbindlichkeit",
                                         amount=amount_to_sell, soll=3500, haben=bank_account_id,
                                         account_id=account_id, quality_check_relevant=True)
-                    self.book_statement(row=row, id="ATG_0000001_0000003",
+                    self.book_statement(row=open_in_depot_row, id="ATG_0000001_0000003",
                                         desc="Schließen einer gekauften Optionsposition",
                                         sdesc="Verbuchen des Gewinns",
                                         amount=result, soll=3500, haben=4830, account_id=account_id,
                                         quality_check_relevant=False)
 
                     if identifier == "l":
-                        self.book_statement(row=row, id="ATG_0000001_0000002",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000001_0000002",
                                             desc="Schließen einer gekauften Optionsposition",  # TODO-Check
                                             sdesc="Ausbuchen der Verbindlichkeit",
                                             amount=amount_to_sell, soll=3500, haben=bank_account_id,
                                             account_id=account_id, quality_check_relevant=True)
-                        self.book_statement(row=row, id="ATG_0000001_0000003",
+                        self.book_statement(row=open_in_depot_row, id="ATG_0000001_0000003",
                                             desc="Schließen einer gekauften Optionsposition",
                                             sdesc="Verbuchen des Verlusts",
                                             amount=result, soll=7210, haben=bank_account_id, account_id=account_id,
                                             quality_check_relevant=False)
 
-        # --- New Block: Handle leftover shares if not all were closed ---
+        # Handle leftover shares if not all were closed
         if stocks_to_sell > 0:
             if direction == "SELL":
                 # Overselling: eröffne eine neue Shortposition für die verbleibenden Aktien
                 new_row = orig_trade.copy()
                 new_row["tradeQuantity"] = -stocks_to_sell  # Negative Menge signalisiert eine Shortposition
                 new_row["amount"] = - (stocks_to_sell / abs(orig_trade["tradeQuantity"])) * abs(orig_trade["amount"])
+                # Adding a new column to mark this as overshoot short position
+                new_row["shortOvershoot"] = True
                 self.add_open_position(new_row)
                 logging.info(f"Neue Shortposition eröffnet für verbleibende {stocks_to_sell} Aktien.")
 
-                # NEU: Buche die Short-Eröffnung
+                # Buche die Short-Eröffnung
                 short_amount = abs(new_row["amount"])  # meist positiv aus der Sicht "Kreditor"
                 self.book_statement(
                     row=new_row,
@@ -565,10 +575,12 @@ class BookingStatementHandler:
                 new_row = orig_trade.copy()
                 new_row["tradeQuantity"] = stocks_to_sell
                 new_row["amount"] = (stocks_to_sell / abs(orig_trade["tradeQuantity"])) * abs(orig_trade["amount"])
+                # Adding a new column to mark this as overshoot long position
+                new_row["longOvershoot"] = True
                 self.add_open_position(new_row)
                 logging.info(f"Neue Longposition eröffnet für verbleibende {stocks_to_sell} Aktien.")
 
-                # NEU: Buche die (ungeplante) Long-Eröffnung durch Overshoot
+                # Buche die (ungeplante) Long-Eröffnung durch Overshoot
                 new_long_amount = abs(new_row["amount"])
                 self.book_statement(
                     row=new_row,
