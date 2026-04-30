@@ -595,6 +595,12 @@ class BookingStatementHandler:
                 )
 
             stocks_to_sell = 0
+            # Overshoot wurde verbucht: die Reste der Aufteilung gehören zum eröffneten
+            # Overshoot-Posten, nicht zur nächsten Buchung. Sonst würde der Restbetrag
+            # in den nächsten Trade hineinlecken (Erlösbuchung mit falschem AMOUNT).
+            stock_adjustment = 0.0
+            restbuchwert = 0.0
+            einnahmen = 0.0
 
         return stock_adjustment, restbuchwert, einnahmen
 
