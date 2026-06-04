@@ -84,6 +84,81 @@ class BookingStatementHandler:
 
         return open_trades_cleaned
 
+    def _withholding_match_key(self, description):
+        ''' Liefert den vergleichbaren Kern einer Quellensteuer-Beschreibung.
+
+            IB formuliert Original und Storno unterschiedlich, z.B.
+            Original: "Withholding @ 20% on Credit Interest for Dec-2024"
+            Storno:   "CANCEL WITHHOLDING ON Credit Interest for Dec-2024"
+            Gemeinsam ist der Teil nach " on " (Periodenbezug). Diesen nutze ich
+            - case-insensitiv - als Abgleichsschluessel. '''
+
+        lower = str(description).lower()
+        marker = " on "
+        idx = lower.find(marker)
+        if idx == -1:
+            return lower.strip()
+        return lower[idx + len(marker):].strip()
+
+    def remove_cancelled_withholding_tax(self, data):
+        ''' Entfernt stornierte Quellensteuer-Buchungen (FRTAX) aus den Daten.
+
+            IB bucht in manchen Fällen eine Quellensteuer (FRTAX) und storniert diese
+            später wieder. Die Stornozeile beginnt mit "CANCEL" (z.B.
+            "CANCEL WITHHOLDING ON Credit Interest for Dec-2024") und bucht den
+            ursprünglichen Betrag mit umgekehrtem Vorzeichen zurück.
+
+            Da sich Original und Storno gegenseitig aufheben, dürfen beide nicht im
+            Buchungsjournal landen - sonst wird der Betrag faelschlicherweise doppelt
+            (bzw. ueberhaupt) verbucht. Diese Methode entfernt daher beide Zeilen.
+
+            Der Abgleich erfolgt ueber den Periodenbezug (Teil nach " on ") und einen
+            exakt entgegengesetzten Betrag, da Original und Storno unterschiedlich
+            formuliert sind. '''
+
+        frtax = data[data["activityCode"] == "FRTAX"]
+        if frtax.empty:
+            return data
+
+        # Stornozeilen: FRTAX-Eintraege, deren Beschreibung mit "CANCEL" beginnt
+        cancel_mask = frtax["activityDescription"].str.upper().str.startswith("CANCEL")
+        cancellations = frtax[cancel_mask]
+        if cancellations.empty:
+            return data
+
+        originals = frtax[~cancel_mask]
+        original_keys = originals["activityDescription"].apply(self._withholding_match_key)
+        ids_to_remove = []
+
+        for _, cancel_row in cancellations.iterrows():
+            cancel_id = cancel_row["transactionID"]
+            ids_to_remove.append(cancel_id)
+
+            cancel_key = self._withholding_match_key(cancel_row["activityDescription"])
+
+            # Passendes Original: gleicher Periodenbezug und entgegengesetzter Betrag
+            candidates = originals[
+                (original_keys == cancel_key)
+                & (~originals["transactionID"].isin(ids_to_remove))
+                & (np.isclose(originals["amount"] + cancel_row["amount"], 0.0, atol=0.01))
+            ]
+
+            if candidates.empty:
+                logging.warning(
+                    f"FRTAX-Storno ohne passende Originalbuchung gefunden "
+                    f"(transactionID {cancel_id}): {cancel_row['activityDescription']}. "
+                    f"Nur die Stornozeile wird entfernt.")
+                continue
+
+            original_id = candidates.iloc[0]["transactionID"]
+            ids_to_remove.append(original_id)
+            logging.info(
+                f"FRTAX-Storno erkannt: Original (transactionID {original_id}) und "
+                f"Storno (transactionID {cancel_id}) werden aus den Daten entfernt "
+                f"({cancel_row['activityDescription']}).")
+
+        return data[~data["transactionID"].isin(ids_to_remove)]
+
     def track_processing(self, account_id, transactionID, amount, date):
         ''' Speichert die Transaction-ID, die erfolgreich verbucht wurde '''
 
@@ -1105,7 +1180,7 @@ class BookingStatementHandler:
                         self.book_statement(row=row, id="tbd",
                                             # TODO: neuer Fall, Konto muss noch geprüft werden ob richtig
                                             desc="Währungsumrechnung", sdesc="Verbuchung des Verlusts",
-                                            amount=row["amount"], soll=bank_account_id, haben=6880,
+                                            amount=row["amount"], soll=6880, haben=bank_account_id,
                                             account_id=account_id,
                                             quality_check_relevant=True)
 
@@ -1312,6 +1387,10 @@ class BookingStatementHandler:
             data = data[(data["activityDescription"] != "Starting Balance")]
             data = data[(data["activityDescription"] != "FX Translations P&L")]
             data = data[(data["activityDescription"] != "Ending Balance")]
+
+            # Schritt 01b: Entfernen stornierter Quellensteuer-Buchungen (FRTAX)
+            # Original und Storno heben sich auf und dürfen nicht ins Journal gelangen
+            data = self.remove_cancelled_withholding_tax(data)
 
             # Schritt 02: Löschen der Bankbewegungen
             # Diese müssen manuell gebucht werden um Doppelbuchungen zu vermeiden
